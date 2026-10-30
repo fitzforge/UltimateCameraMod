@@ -121,6 +121,7 @@ public partial class MainWindow : Window
         string styleId = GetSelectedStyleId();
         bool hudEnabled = CenterHudCheck.IsChecked == true;
         int hudWidth = GetHudWidth();
+        double screenAspect = SystemParameters.PrimaryScreenWidth / SystemParameters.PrimaryScreenHeight;
 
         SetGlobalBusy(true, L("Status_InstallingCamera"));
         SetStatus(L("Status_PreparingSessionXml"), "Accent");
@@ -138,7 +139,7 @@ public partial class MainWindow : Window
                 try
                 {
                     log(L("Status_InstallingHud"));
-                    HudMod.InstallCenteredHud(gameDir, hudWidth, log);
+                    HudMod.InstallCenteredHud(gameDir, hudWidth, log, screenAspect);
                 }
                 catch (Exception hudEx)
                 {

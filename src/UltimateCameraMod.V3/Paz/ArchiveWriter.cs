@@ -209,6 +209,17 @@ public static class ArchiveWriter
         return result;
     }
 
+    /// <summary>Random comment body that cannot terminate a CSS comment early (no '*' or '/').</summary>
+    private static byte[] MakeCssCommentSafeRandomContent(int length)
+    {
+        byte[] alphabet = BuildAlphabet().Where(c => c != (byte)'*' && c != (byte)'/').ToArray();
+        byte[] rand = RandomNumberGenerator.GetBytes(length);
+        byte[] result = new byte[length];
+        for (int i = 0; i < length; i++)
+            result[i] = alphabet[rand[i] % alphabet.Length];
+        return result;
+    }
+
     private static byte[]? _alphabet;
     private static byte[] BuildAlphabet()
     {
@@ -632,7 +643,7 @@ public static class ArchiveWriter
         return null;
     }
 
-    private static byte[]? InflateByRandomCommentPadding(byte[] plaintext, int targetCompSize, int targetOrigSize)
+    private static byte[]? InflateByRandomCommentPadding(byte[] plaintext, int targetCompSize, int targetOrigSize, bool css = false)
     {
         // Binary search on random comment body length to hit the exact compressed size.
         // We append <!--RANDOM_BODY--> then pad remaining bytes with nulls.
@@ -643,17 +654,20 @@ public static class ArchiveWriter
 
         for (int attempt = 0; attempt < 10; attempt++)
         {
-            byte[] randPool = MakeXmlSafeRandomContent(maxBody);
+            byte[] randPool = css ? MakeCssCommentSafeRandomContent(maxBody) : MakeXmlSafeRandomContent(maxBody);
+            byte[] open = css ? System.Text.Encoding.ASCII.GetBytes("/*!-") : System.Text.Encoding.ASCII.GetBytes("<!--");
+            byte[] close = css ? System.Text.Encoding.ASCII.GetBytes("-*/") : System.Text.Encoding.ASCII.GetBytes("-->");
 
             byte[] BuildTrial(int bodyLen)
             {
                 byte[] buf = new byte[targetOrigSize];
                 Array.Copy(plaintext, buf, plaintext.Length);
                 int pos = plaintext.Length;
-                buf[pos++] = 0x3C; buf[pos++] = 0x21; buf[pos++] = 0x2D; buf[pos++] = 0x2D;
+                Array.Copy(open, 0, buf, pos, open.Length);
+                pos += open.Length;
                 Array.Copy(randPool, 0, buf, pos, bodyLen);
                 pos += bodyLen;
-                buf[pos++] = 0x2D; buf[pos++] = 0x2D; buf[pos++] = 0x3E;
+                Array.Copy(close, 0, buf, pos, close.Length);
                 return buf;
             }
 
@@ -844,8 +858,9 @@ public static class ArchiveWriter
                 "The compacted CSS is too large for the archive slot.");
         }
 
-        // Inflate: append <!--RANDOM_BODY--> (same as CentreHUD)
-        var result = InflateByRandomCommentPadding(plaintext, targetCompSize, targetOrigSize);
+        // Inflate with a real CSS comment: the 2.04 UI parser reads these files directly, and an
+        // HTML-style comment full of random braces/quotes can corrupt the rules around it.
+        var result = InflateByRandomCommentPadding(plaintext, targetCompSize, targetOrigSize, css: true);
         if (result != null) return result;
 
         throw new InvalidOperationException(

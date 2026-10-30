@@ -13,6 +13,40 @@ public static class HudMod
     private static readonly string[] HudHtmlPaths = { "ui/minimaphudview2.html", "ui/statusgaugeview2.html" };
     private const string CssPath = "ui/gamecommon.css";
 
+    // Since 2.04 the game loads compiled ui/bin__/*.uibinary views instead of the HTML above, so the
+    // safe frame can no longer be injected. The view stylesheets are still read as text, so the HUD is
+    // moved into a centred band directly in them; world-space trackers are left untouched.
+    // Positions are percentages of the screen so they do not depend on the UI's pixel scale.
+
+    // Left-anchored containers: left edge moves to the band's left edge, keeping the original offset.
+    private static readonly (string Path, string[] Selectors)[] ShiftLeftCss =
+    {
+        ("ui/minimaphudview2.css", new[] { ".minimap-hud", "#QuestHudWrap" }),
+        ("ui/statusgaugeview2.css", new[] { ".ui-scale-position-left-bot" }),
+        // Quest progress notices: their left-mid scale wrap has no id, so the content is moved instead.
+        ("ui/alertsystemview.css", new[] { "#ChallangeHudWrap" }),
+    };
+
+    // HUD scale wraps narrowed to the band. Wraps with ui-scale-wrap-size-max are already full-screen
+    // frames; the others (FullFrame) also get made into one so their absolutely placed children follow.
+    private static readonly (string Path, string[] Ids, bool FullFrame)[] BandWrapCss =
+    {
+        ("ui/alertsystemview.css", AlertWrapIds(), false),
+        ("ui/alertsystemoverview.css", AlertWrapIds(), false),
+        ("ui/hudview2.css", new[] { "UIScaleHudAdditionalKeyguideList", "UIHudScaleHudKeyGuidWrap" }, false),
+        ("ui/hudview2.css", new[] { "UIHudScalePlayGuideHudWrap" }, true),
+    };
+
+    // Centre wraps are skipped: centred content stays put, and the small overview slot has no room.
+    private static string[] AlertWrapIds() => new[]
+    {
+        "UIScaleLeftTopWrap", "UIScaleLeftMidWrap", "UIScaleLeftBotWrap",
+        "UIScaleRightTopWrap", "UIScaleRightMidWrap", "UIScaleRightBotWrap",
+        "UIScaleRightMidKnowledgeDescWrap",
+    };
+
+    private const double UiReferenceHeight = 1080.0;
+
     private const string SafeFrameId = "HUDSafeFrame";
     private const int DefaultMaxWidth = 1920;
 
@@ -36,7 +70,8 @@ public static class HudMod
 
     private static string CompactCss(string text)
     {
-        var t = Regex.Replace(text, @"\n\s*\n+", "\n");
+        var t = Regex.Replace(text, @"/\*.*?\*/", "", RegexOptions.Singleline);
+        t = Regex.Replace(t, @"\n\s*\n+", "\n");
         t = Regex.Replace(t, @"[ \t]+\n", "\n");
         return Regex.Replace(t, @"\s*([{}:;,])\s*", "$1");
     }
@@ -50,6 +85,9 @@ public static class HudMod
             t = HtmlCommentRe.Replace(t, "");
         return Regex.Replace(t, @"\n\s*\n+", "\n");
     }
+
+    // Throws on invalid bytes so encrypted data is not mistaken for plain text.
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, true);
 
     // ── PAZ I/O ──────────────────────────────────────────────────────
 
@@ -69,7 +107,10 @@ public static class HudMod
                 byPath[key] = e;
         }
 
-        var allPaths = HudHtmlPaths.Append(CssPath);
+        var allPaths = HudHtmlPaths.Append(CssPath)
+            .Concat(ShiftLeftCss.Select(c => c.Path))
+            .Concat(BandWrapCss.Select(c => c.Path))
+            .Distinct();
         var result = new List<PazEntry>();
         foreach (var p in allPaths)
         {
@@ -104,7 +145,7 @@ public static class HudMod
             try
             {
                 byte[] plain = CompressionUtils.Lz4Decompress(raw, entry.OrigSize);
-                try { return (Encoding.UTF8.GetString(plain).TrimEnd('\0'), false); }
+                try { return (StrictUtf8.GetString(plain).TrimEnd('\0'), false); }
                 catch (DecoderFallbackException) { }
             }
             catch { }
@@ -121,7 +162,7 @@ public static class HudMod
             return (Encoding.UTF8.GetString(fallback).TrimEnd('\0'), false);
         }
 
-        try { return (Encoding.UTF8.GetString(raw).TrimEnd('\0'), false); }
+        try { return (StrictUtf8.GetString(raw).TrimEnd('\0'), false); }
         catch
         {
             byte[] dec = AssetCodec.Decode(raw, Path.GetFileName(entry.Path));
@@ -195,6 +236,57 @@ public static class HudMod
         return modified[..insertAt] + "\n" + newRule + modified[insertAt..];
     }
 
+    /// <summary>Band as percentages of the screen width: (left, width).</summary>
+    private static (double Left, double Width) GetBand(int maxWidth, double screenAspect)
+    {
+        double width = Math.Min(1.0, maxWidth / UiReferenceHeight / screenAspect);
+        return ((1.0 - width) / 2 * 100, width * 100);
+    }
+
+    private static string Pct(double v) => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture) + "%";
+
+    /// <summary>
+    /// Moves left-anchored rules to the band's left edge: the original left offset becomes a margin.
+    /// Uses left/margin rather than transform because the engine drives transform for HUD scaling.
+    /// </summary>
+    private static string ShiftLeft(string text, string[] selectors, (double Left, double Width) band)
+    {
+        foreach (var selector in selectors)
+        {
+            var rule = new Regex(@"(?<=(?:^|\}|\*/)\s*)" + Regex.Escape(selector) + @"\s*\{([^}]*)\}");
+            var m = rule.Match(text);
+            if (!m.Success) throw new InvalidOperationException($"{selector} not found in CSS");
+
+            string body = m.Groups[1].Value;
+            var left = Regex.Match(body, @"(?<![-\w])left\s*:\s*(-?[\d.]+)px");
+            string offset = left.Success ? left.Groups[1].Value + "px" : "0px";
+            body = SetCssProp(body, "left", Pct(band.Left));
+            body = SetCssProp(body, "margin-left", offset);
+            text = text[..m.Groups[1].Index] + body + text[(m.Groups[1].Index + m.Groups[1].Length)..];
+        }
+        return text;
+    }
+
+    /// <summary>Appends id rules that narrow full-screen wraps to the band (ids outrank the shared class).</summary>
+    private static string AddBandWraps(string text, string[] ids, bool fullFrame, (double Left, double Width) band)
+    {
+        var sb = new StringBuilder(text.TrimEnd('\0').TrimEnd());
+        string frame = fullFrame ? "position:absolute;top:0px;height:100%;" : "";
+        foreach (var id in ids.Where(id => !text.Contains($"#{id}{{")))
+            sb.Append($"#{id}{{{frame}left:{Pct(band.Left)};width:{Pct(band.Width)}}}");
+        return sb.ToString();
+    }
+
+    private static string SetCssProp(string body, string prop, string value)
+    {
+        var re = new Regex(@"(?<![-\w])" + Regex.Escape(prop) + @"\s*:\s*[^;}]*;?", RegexOptions.IgnoreCase);
+        if (re.IsMatch(body))
+            return re.Replace(body, $"{prop}: {value};", 1);
+        string trimmed = body.TrimEnd();
+        if (trimmed.Length > 0 && !trimmed.EndsWith(';')) trimmed += ";";
+        return trimmed + $" {prop}: {value}; ";
+    }
+
     // ── Payload building ─────────────────────────────────────────────
 
     private static byte[] BuildPayload(string modifiedText, PazEntry entry, bool encrypted)
@@ -226,7 +318,8 @@ public static class HudMod
                 {
                     if (plaintext.Length > entry.CompSize)
                         throw new InvalidOperationException($"Too large: {plaintext.Length} > {entry.CompSize}");
-                    payload = new byte[entry.CompSize];
+                    // Pad with spaces: the slot is read as text up to its full size.
+                    payload = Enumerable.Repeat((byte)' ', entry.CompSize).ToArray();
                     Array.Copy(plaintext, payload, plaintext.Length);
                 }
 
@@ -248,14 +341,16 @@ public static class HudMod
 
     private static bool BackupExists() => File.Exists(Path.Combine(BackupsDir, "meta.txt"));
 
+    /// <summary>Backs up entries that have no backup yet; existing backups are kept as the vanilla copy.</summary>
     private static void SaveBackups(List<PazEntry> entries)
     {
         Directory.CreateDirectory(BackupsDir);
         foreach (var entry in entries)
         {
-            byte[] raw = ReadRaw(entry);
             string fname = entry.Path.Replace('/', '_').Replace('\\', '_') + ".bin";
-            File.WriteAllBytes(Path.Combine(BackupsDir, fname), raw);
+            string path = Path.Combine(BackupsDir, fname);
+            if (!File.Exists(path))
+                File.WriteAllBytes(path, ReadRaw(entry));
         }
         var meta = string.Join('\n', entries.Select(e => $"{e.Path}|{e.CompSize}|{e.OrigSize}|{e.Offset}"));
         File.WriteAllText(Path.Combine(BackupsDir, "meta.txt"), meta);
@@ -292,9 +387,10 @@ public static class HudMod
     // ── Public API ───────────────────────────────────────────────────
 
     public static Dictionary<string, object> InstallCenteredHud(string gameDir,
-        int maxWidth = DefaultMaxWidth, Action<string>? log = null)
+        int maxWidth = DefaultMaxWidth, Action<string>? log = null, double screenAspect = 32.0 / 9.0)
     {
-        log?.Invoke($"[HUD] Finding UI entries (max-width: {maxWidth}px)...");
+        var band = GetBand(maxWidth, screenAspect);
+        log?.Invoke($"[HUD] Finding UI entries (max-width: {maxWidth}px, band {Pct(band.Width)} of {screenAspect:0.##}:1 screen)...");
         var entries = FindUiEntries(gameDir);
 
         var decoded = new Dictionary<string, (string Text, bool Encrypted)>();
@@ -308,11 +404,8 @@ public static class HudMod
             .Where(e => e.Path.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
             .Any(e => decoded[e.Path].Text.Contains(SafeFrameId));
 
-        if (!BackupExists())
-        {
-            log?.Invoke("[HUD] Saving backups...");
-            SaveBackups(entries);
-        }
+        log?.Invoke("[HUD] Saving backups...");
+        SaveBackups(entries);
 
         // If already installed (possibly different mode), restore vanilla first then reinstall
         if (alreadyInstalled)
@@ -344,8 +437,15 @@ public static class HudMod
         {
             var (text, enc) = decoded[entry.Path];
             string modified;
+            var shifts = ShiftLeftCss.Where(c => c.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase)).ToList();
+            var wraps = BandWrapCss.Where(c => c.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase)).ToList();
             if (entry.Path.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
                 modified = ModifyHtml(entry.Path, text, maxWidth);
+            else if (shifts.Count > 0 || wraps.Count > 0)
+            {
+                modified = shifts.Aggregate(text, (t, sh) => ShiftLeft(t, sh.Selectors, band));
+                modified = wraps.Aggregate(modified, (t, w) => AddBandWraps(t, w.Ids, w.FullFrame, band));
+            }
             else if (entry.Path.EndsWith(".css", StringComparison.OrdinalIgnoreCase))
                 modified = ModifyCss(text, maxWidth);
             else continue;
@@ -378,16 +478,17 @@ public static class HudMod
 
         var entries = FindUiEntries(gameDir);
 
+        // Entries without a backup were never modified (e.g. view CSS added after an older install).
         foreach (var entry in entries)
         {
             byte[]? data = LoadBackup(entry);
-            if (data == null) return new() { ["status"] = "error" };
-            if (data.Length != entry.CompSize) return new() { ["status"] = "stale_backup" };
+            if (data != null && data.Length != entry.CompSize) return new() { ["status"] = "stale_backup" };
         }
 
         foreach (var entry in entries)
         {
-            byte[] data = LoadBackup(entry)!;
+            byte[]? data = LoadBackup(entry);
+            if (data == null) continue;
             var restoreTs = ArchiveWriter.SaveTimestamps(entry.PazFile);
             using (var fs = new FileStream(entry.PazFile, FileMode.Open, FileAccess.Write))
             {
