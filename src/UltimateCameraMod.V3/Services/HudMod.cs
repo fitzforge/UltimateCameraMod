@@ -25,11 +25,14 @@ public static class HudMod
         ("ui/statusgaugeview2.css", new[] { ".ui-scale-position-left-bot" }),
     };
 
-    // Full-screen HUD scale wraps (ui-scale-wrap-size-max): narrowed to the band.
-    private static readonly (string Path, string[] Ids)[] BandWrapCss =
+    // HUD scale wraps narrowed to the band. Wraps with ui-scale-wrap-size-max are already full-screen
+    // frames; the others (FullFrame) also get made into one so their absolutely placed children follow.
+    private static readonly (string Path, string[] Ids, bool FullFrame)[] BandWrapCss =
     {
-        ("ui/alertsystemview.css", AlertWrapIds()),
-        ("ui/alertsystemoverview.css", AlertWrapIds()),
+        ("ui/alertsystemview.css", AlertWrapIds(), false),
+        ("ui/alertsystemoverview.css", AlertWrapIds(), false),
+        ("ui/hudview2.css", new[] { "UIScaleHudAdditionalKeyguideList", "UIHudScaleHudKeyGuidWrap" }, false),
+        ("ui/hudview2.css", new[] { "UIHudScalePlayGuideHudWrap" }, true),
     };
 
     // Centre wraps are skipped: centred content stays put, and the small overview slot has no room.
@@ -104,7 +107,8 @@ public static class HudMod
 
         var allPaths = HudHtmlPaths.Append(CssPath)
             .Concat(ShiftLeftCss.Select(c => c.Path))
-            .Concat(BandWrapCss.Select(c => c.Path));
+            .Concat(BandWrapCss.Select(c => c.Path))
+            .Distinct();
         var result = new List<PazEntry>();
         foreach (var p in allPaths)
         {
@@ -262,11 +266,12 @@ public static class HudMod
     }
 
     /// <summary>Appends id rules that narrow full-screen wraps to the band (ids outrank the shared class).</summary>
-    private static string AddBandWraps(string text, string[] ids, (double Left, double Width) band)
+    private static string AddBandWraps(string text, string[] ids, bool fullFrame, (double Left, double Width) band)
     {
         var sb = new StringBuilder(text.TrimEnd('\0').TrimEnd());
-        foreach (var id in ids)
-            sb.Append($"#{id}{{left:{Pct(band.Left)};width:{Pct(band.Width)}}}");
+        string frame = fullFrame ? "position:absolute;top:0px;height:100%;" : "";
+        foreach (var id in ids.Where(id => !text.Contains($"#{id}{{")))
+            sb.Append($"#{id}{{{frame}left:{Pct(band.Left)};width:{Pct(band.Width)}}}");
         return sb.ToString();
     }
 
@@ -431,13 +436,13 @@ public static class HudMod
             var (text, enc) = decoded[entry.Path];
             string modified;
             var shift = ShiftLeftCss.FirstOrDefault(c => c.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase));
-            var wraps = BandWrapCss.FirstOrDefault(c => c.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase));
+            var wraps = BandWrapCss.Where(c => c.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase)).ToList();
             if (entry.Path.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
                 modified = ModifyHtml(entry.Path, text, maxWidth);
             else if (shift.Path != null)
                 modified = ShiftLeft(text, shift.Selectors, band);
-            else if (wraps.Path != null)
-                modified = AddBandWraps(text, wraps.Ids, band);
+            else if (wraps.Count > 0)
+                modified = wraps.Aggregate(text, (t, w) => AddBandWraps(t, w.Ids, w.FullFrame, band));
             else if (entry.Path.EndsWith(".css", StringComparison.OrdinalIgnoreCase))
                 modified = ModifyCss(text, maxWidth);
             else continue;
