@@ -23,6 +23,8 @@ public static class HudMod
     {
         ("ui/minimaphudview2.css", new[] { ".minimap-hud", "#QuestHudWrap" }),
         ("ui/statusgaugeview2.css", new[] { ".ui-scale-position-left-bot" }),
+        // Quest progress notices: their left-mid scale wrap has no id, so the content is moved instead.
+        ("ui/alertsystemview.css", new[] { "#ChallangeHudWrap" }),
     };
 
     // HUD scale wraps narrowed to the band. Wraps with ui-scale-wrap-size-max are already full-screen
@@ -435,14 +437,15 @@ public static class HudMod
         {
             var (text, enc) = decoded[entry.Path];
             string modified;
-            var shift = ShiftLeftCss.FirstOrDefault(c => c.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase));
+            var shifts = ShiftLeftCss.Where(c => c.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase)).ToList();
             var wraps = BandWrapCss.Where(c => c.Path.Equals(entry.Path, StringComparison.OrdinalIgnoreCase)).ToList();
             if (entry.Path.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
                 modified = ModifyHtml(entry.Path, text, maxWidth);
-            else if (shift.Path != null)
-                modified = ShiftLeft(text, shift.Selectors, band);
-            else if (wraps.Count > 0)
-                modified = wraps.Aggregate(text, (t, w) => AddBandWraps(t, w.Ids, w.FullFrame, band));
+            else if (shifts.Count > 0 || wraps.Count > 0)
+            {
+                modified = shifts.Aggregate(text, (t, sh) => ShiftLeft(t, sh.Selectors, band));
+                modified = wraps.Aggregate(modified, (t, w) => AddBandWraps(t, w.Ids, w.FullFrame, band));
+            }
             else if (entry.Path.EndsWith(".css", StringComparison.OrdinalIgnoreCase))
                 modified = ModifyCss(text, maxWidth);
             else continue;
